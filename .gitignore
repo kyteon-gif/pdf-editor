@@ -1,5 +1,13 @@
-/models
-/uploads
-/file_caches
-/exports
-/snapshots
+# 模型與資料目錄不進版控
+models/
+file_caches/
+snapshots/
+uploads/
+exports/
+
+# Python
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
