@@ -11,3 +11,7 @@ __pycache__/
 .env
 *.egg-info/
 dist/
+.DS_Store
+.gz
+.tar.gz
+.zip

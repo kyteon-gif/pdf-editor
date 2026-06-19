@@ -6,10 +6,19 @@ Unit 1：確認 Flask 可以啟動，/api/health 回傳正確結構。
     pytest tests/test_unit1_startup.py -v
 """
 
-import pytest
+import sys
+from pathlib import Path
 
-# sys.path 由根目錄的 conftest.py 統一管理，這裡不需要手動設定
-from app import create_app
+_ROOT = Path(__file__).parent.parent.resolve()
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# 強制推到最前面，蓋過環境裡已安裝的同名套件
+
+
+# 確保專案根目錄在 sys.path 最前面（macOS/miniforge 防禦）
+import pytest
+from pdf_editor import create_app
 
 
 @pytest.fixture()

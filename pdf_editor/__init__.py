@@ -30,11 +30,13 @@ def create_app() -> Flask:
     app.config["UPLOAD_FOLDER"]       = str(UPLOAD_DIR)
 
     # ── 註冊藍圖 ──────────────────────────────────────────────
-    from app.routes.health import health_bp
+    from pdf_editor.routes.health import health_bp
+    from pdf_editor.routes.upload import upload_bp
     app.register_blueprint(health_bp)
+    app.register_blueprint(upload_bp)
 
     # ── 啟動時初始化模型 Registry ─────────────────────────────
-    from app.services.model_registry import ModelRegistry
+    from pdf_editor.services.model_registry import ModelRegistry
     ModelRegistry.ensure_all()
 
     return app

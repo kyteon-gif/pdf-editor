@@ -4,7 +4,7 @@ routes/health.py — 健康檢查端點
 """
 
 from flask import Blueprint, jsonify
-from app.services.model_registry import ModelRegistry
+from pdf_editor.services.model_registry import ModelRegistry
 
 health_bp = Blueprint("health", __name__)
 

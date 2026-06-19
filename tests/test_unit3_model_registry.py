@@ -9,8 +9,18 @@ Unit 3：驗證 ModelRegistry 的本機檢查、status 格式、path 回傳。
       is_ready() 應回傳 True；尚未放置則回傳 False 但不報錯。
 """
 
+import sys
+from pathlib import Path
 
-from app.services.model_registry import ModelRegistry
+_ROOT = Path(__file__).parent.parent.resolve()
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# 強制推到最前面，蓋過環境裡已安裝的同名套件
+
+
+# 確保專案根目錄在 sys.path 最前面（macOS/miniforge 防禦）
+from pdf_editor.services.model_registry import ModelRegistry
 from config import MODEL_MANIFEST
 
 
