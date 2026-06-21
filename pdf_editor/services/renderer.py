@@ -101,12 +101,27 @@ def build_html(doc: dict, cache_manager) -> str:
 def _render_text(blk: dict) -> str:
     btype   = blk.get("type", "body")
     content = escape(blk.get("content", ""))
+    font_size = blk.get("font_size")
+
     css_class = {
         "cover":     "block-cover",
         "heading_1": "block-h1",
         "heading_2": "block-h2",
         "appendix":  "block-appendix",
     }.get(btype, "block-body")
+
+    # 防禦性修正：classifier 對圖表內小型標籤文字（圖例、座標軸文字、
+    # 百分比數字等）有時會誤判為 heading_1/heading_2，但這些文字的
+    # 實際字級通常遠小於真正的標題。若直接套用標題樣式的大字體與
+    # 大段落間距（margin: 1.2em 0 0.6em 等），單一文件中只要有十幾個
+    # 這樣的誤判區塊，疊加的間距就足以把原本一頁的內容撐到兩三頁。
+    #
+    # 這裡用實際字級（font_size）做最後把關：字級明顯小於一般內文
+    # （閾值 9pt）時，即使分類結果是 heading，仍強制降級為一般內文
+    # 樣式，避免被誤判的標籤撐爆版面。這不修正分類本身的準確度
+    # （classifier.py 的職責），只確保渲染結果不會因誤判而失控。
+    if btype in ("heading_1", "heading_2") and font_size is not None and font_size < 9:
+        return f'<div class="block-body-compact">{content}</div>'
 
     tag = "h1" if btype in ("cover", "heading_1") else (
         "h2" if btype == "heading_2" else "p"
@@ -149,13 +164,33 @@ def _render_image(blk: dict, blk_id: str, cache_manager) -> str:
     if path is None or not Path(path).exists():
         return f'<div class="image-missing">[圖片遺失：{escape(blk_id)}]</div>'
 
+    # 圖片渲染尺寸優先順序：
+    # 1. blk["width"]/["height"]（使用者透過 transform API 手動調整過的值）
+    # 2. bbox 算出的寬高（圖片在原始 PDF 頁面上應呈現的實際尺寸）
+    # 3. 都沒有時才退回 CSS max-width:100% 自動撐開
+    #
+    # 重要修復：原本完全依賴 width/height 欄位，但 parser.py 從未填入
+    # 這兩個欄位（永遠是 None），導致高解析度圖片以原始像素尺寸渲染，
+    # 經常遠超過一頁 A4 紙的可用高度，逼得 WeasyPrint 自動分頁，
+    # 讓本該是單頁的內容被拆成多頁。改用 bbox 的寬高還原圖片在
+    # 原始 PDF 頁面上的實際比例與大小，避免異常撐高。
     width  = blk.get("width")
     height = blk.get("height")
+
+    if not width or not height:
+        bbox = blk.get("bbox")
+        if bbox and len(bbox) == 4:
+            x0, top, x1, bottom = bbox
+            bbox_width  = x1 - x0
+            bbox_height = bottom - top
+            if bbox_width > 0 and bbox_height > 0:
+                width, height = bbox_width, bbox_height
+
     style_parts = []
     if width:
-        style_parts.append(f"width:{width}px")
+        style_parts.append(f"width:{width}pt")
     if height:
-        style_parts.append(f"height:{height}px")
+        style_parts.append(f"height:{height}pt")
     style_attr = f' style="{";".join(style_parts)}"' if style_parts else ""
 
     # WeasyPrint 支援 file:// 路徑
@@ -176,6 +211,7 @@ body  { font-family: "Noto Sans CJK TC", "Microsoft JhengHei", sans-serif; font-
 .block-h2       { font-size: 13pt; font-weight: bold; margin: 1em 0 0.5em; }
 .block-body     { margin: 0.4em 0; }
 .block-appendix { font-size: 10pt; color: #444; margin: 0.4em 0; }
+.block-body-compact { font-size: 9pt; margin: 0.15em 0; line-height: 1.3; }
 
 table { border-collapse: collapse; width: 100%; margin: 0.8em 0; }
 th, td { border: 1px solid #999; padding: 4px 8px; font-size: 10pt; text-align: left; }
@@ -184,6 +220,6 @@ th { background: #f0f0f0; font-weight: bold; }
 .table-overview th { background: #dce6f1; }
 .row-total td { font-weight: bold; background: #f7f7f7; }
 
-.block-image { max-width: 100%; display: block; margin: 0.8em auto; }
+.block-image { max-width: 100%; max-height: 24cm; display: block; margin: 0.8em auto; }
 .image-missing { color: #c0392b; font-style: italic; padding: 1em; border: 1px dashed #c0392b; }
 """

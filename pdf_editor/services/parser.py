@@ -73,32 +73,46 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
                 fitz_page_cache[page_num] = fitz_doc_for_text[page_num - 1]
 
             # ── 1a. 擷取表格（先擷取，後續排除這些區域的文字）──
-            page_tables = page.extract_tables(
-                table_settings={
-                    "vertical_strategy":   "lines",
-                    "horizontal_strategy": "lines",
-                    "snap_tolerance":      3,
-                    "join_tolerance":      3,
-                    "edge_min_length":     3,
-                    "min_words_vertical":  1,
-                    "min_words_horizontal": 1,
-                }
-            )
+            table_settings = {
+                "vertical_strategy":   "lines",
+                "horizontal_strategy": "lines",
+                "snap_tolerance":      3,
+                "join_tolerance":      3,
+                "edge_min_length":     3,
+                "min_words_vertical":  1,
+                "min_words_horizontal": 1,
+            }
+
+            # 改用 find_tables() 而非 extract_tables()：extract_tables() 只回傳
+            # 純文字格子內容，沒有每個 cell 的 bbox，導致表格完全無法套用
+            # cid 亂碼偵測與 OCR fallback（先前的 bug：表格內容繞過了整套
+            # OCR 修正機制，匯出時顯示原始 (cid:XXXX) 亂碼）。
+            # find_tables() 回傳 Table 物件，可透過 row.cells 取得每個
+            # 儲存格的 bbox，藉此逐格做 cid 偵測與 OCR 修正。
+            found_tables = page.find_tables(table_settings=table_settings)
 
             table_bboxes: list[tuple] = []
-            for tbl_raw in (page_tables or []):
-                if not tbl_raw:
+            for table_obj in found_tables:
+                tbl_rows_raw = table_obj.extract()
+                if not tbl_rows_raw:
                     continue
+
                 blk_id = _make_id("tbl", page_num, len(tables))
-                tbl_bbox = _find_table_bbox(page, tbl_raw)
+                tbl_bbox = table_obj.bbox
                 table_bboxes.append(tbl_bbox)
+
+                corrected_rows, any_ocr_used, any_still_garbled = _correct_table_cells(
+                    table_obj, tbl_rows_raw, fitz_page_cache, page_num
+                )
 
                 tables[blk_id] = {
                     "id":       blk_id,
                     "type":     "table",        # 預設；classifier 可能改為 overview
                     "page":     page_num,
                     "bbox":     list(tbl_bbox),
-                    "raw_rows": _clean_table(tbl_raw),
+                    "raw_rows": _clean_table(corrected_rows),
+                    "ocr_used": any_ocr_used,
+                    "encoding_warning": any_still_garbled,
                 }
                 structure.append(blk_id)
 
@@ -170,6 +184,20 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
     # ── Step 2：PyMuPDF 擷取嵌入圖片 ─────────────────────────
     # 圖片擷取沿用同一份 fitz 文件，避免重複開檔
     fitz_doc = fitz_doc_for_text
+
+    # 防禦性檢查：pdfplumber 與 fitz 對同一份 PDF 算出的頁數理論上
+    # 應該相同。若不同，代表這份 PDF 的內部頁面結構有異常
+    # （常見於某些轉檔工具產生的 PDF），會導致圖片的頁碼基準
+    # 與文字/表格的頁碼基準不同步，進而讓匯出階段把同一個視覺頁面
+    # 誤判成多頁（多餘的分頁符號）。記錄警告，方便日後追查。
+    if len(fitz_doc) != page_count:
+        logger.warning(
+            "[Parser] 頁數不一致：pdfplumber 偵測到 %d 頁，"
+            "fitz 偵測到 %d 頁。圖片頁碼可能與文字/表格頁碼不同步，"
+            "匯出時有機率出現非預期的分頁。",
+            page_count, len(fitz_doc),
+        )
+
     for page_num in range(len(fitz_doc)):
         page_fitz = fitz_doc[page_num]
         img_list   = page_fitz.get_images(full=True)
@@ -195,7 +223,13 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
             img_rects = page_fitz.get_image_rects(xref)
             bbox = list(img_rects[0]) if img_rects else [0.0, 0.0, 0.0, 0.0]
 
-            blk_id = _make_id("img", page_num + 1, img_index)
+            # 以 pdfplumber 的 page_count 為唯一基準 clamp 頁碼，
+            # 避免 fitz 與 pdfplumber 頁數不同步時，圖片頁碼超出
+            # 文字/表格頁碼的有效範圍，導致匯出階段排序與分頁判斷
+            # 出現非預期結果（同一視覺頁面被誤判成多頁）。
+            img_page = min(page_num + 1, page_count)
+
+            blk_id = _make_id("img", img_page, img_index)
             images[blk_id] = img_bytes
             structure.append(blk_id)
 
@@ -203,7 +237,7 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
             texts[blk_id] = {
                 "id":        blk_id,
                 "type":      "image",
-                "page":      page_num + 1,
+                "page":      img_page,
                 "bbox":      bbox,
                 "content":   "",
                 "font_size": None,
@@ -426,6 +460,65 @@ def _normalize_image_colorspace(img_bytes: bytes, ext: str) -> tuple[bytes, str]
     except Exception as e:
         logger.warning("[Parser] 圖片色彩空間正規化失敗，保留原始格式: %s", e)
         return img_bytes, ext
+
+
+def _correct_table_cells(
+    table_obj, raw_rows: list[list], page_cache: dict, page_num: int,
+) -> tuple[list[list], bool, bool]:
+    """
+    對表格每個儲存格做 cid 亂碼偵測，異常時用該儲存格的 bbox 進行
+    OCR 重新辨識，修正後寫回對應位置。
+
+    背景（重要修復）：原本表格擷取直接使用 pdfplumber 的
+    extract_tables()，這個方法只回傳純文字內容，沒有提供任何 bbox
+    資訊，導致表格完全沒有套用文字區塊已有的 cid 偵測 / OCR
+    fallback 機制 —— 表格文字若 PDF 字型缺少 ToUnicode 對照，
+    匯出結果會直接顯示 "(cid:1234)" 原始亂碼。
+    改用 find_tables() 後，Table 物件的 row.cells 可提供逐格 bbox，
+    讓表格也能套用與一般文字行相同的修正流程。
+
+    Args:
+        table_obj: pdfplumber Table 物件（page.find_tables() 的結果之一）
+        raw_rows: table_obj.extract() 的結果，與 table_obj.rows 一一對應
+        page_cache: {page_num: fitz.Page} 快取，供 OCR 使用
+        page_num: 目前頁碼（1-indexed），對應 page_cache 的 key
+
+    Returns:
+        (corrected_rows, any_ocr_used, any_still_garbled)
+        - corrected_rows: 修正後的二維陣列，結構與 raw_rows 相同
+        - any_ocr_used: 是否至少有一個儲存格被 OCR 修正過
+        - any_still_garbled: 是否仍有儲存格修正後依然是亂碼（需人工確認）
+    """
+    corrected_rows = [list(row) for row in raw_rows]
+    any_ocr_used = False
+    any_still_garbled = False
+
+    table_rows = table_obj.rows
+    for r_idx, row in enumerate(table_rows):
+        if r_idx >= len(corrected_rows):
+            break
+        for c_idx, cell_bbox in enumerate(row.cells):
+            if cell_bbox is None or c_idx >= len(corrected_rows[r_idx]):
+                continue
+
+            cell_text = corrected_rows[r_idx][c_idx]
+            if cell_text is None:
+                continue
+            cell_text = str(cell_text)
+
+            if not _is_cid_garbled(cell_text):
+                continue
+
+            # cell_bbox 格式為 (x0, top, x1, bottom)，與其餘函式使用的
+            # bbox 慣例一致，可直接傳入 OCR 函式
+            ocr_text = _extract_text_via_ocr(page_cache, page_num, cell_bbox)
+            if ocr_text and not _is_cid_garbled(ocr_text):
+                corrected_rows[r_idx][c_idx] = ocr_text
+                any_ocr_used = True
+            else:
+                any_still_garbled = True
+
+    return corrected_rows, any_ocr_used, any_still_garbled
 
 
 def _make_id(prefix: str, page: int, index: int) -> str:

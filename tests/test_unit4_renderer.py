@@ -122,7 +122,7 @@ class TestBuildHtmlStructure:
         img_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
         html = build_html(_fake_doc(), FakeCacheManager(image_path=img_file))
         assert "<img" in html
-        assert "width:300px" in html or "width: 300px" in html
+        assert "width:300pt" in html or "width: 300pt" in html
 
     def test_unknown_block_in_structure_skipped_gracefully(self):
         doc = _fake_doc()
@@ -183,6 +183,36 @@ class TestRenderText:
     def test_body_default_class(self):
         html = _render_text({"type": "body", "content": "一般內文"})
         assert "block-body" in html
+
+    def test_small_font_heading_renders_compact(self):
+        """
+        重要修復：classifier 對圖表小標籤（圖例、座標軸文字等）
+        有時誤判為 heading_1，若直接套用標題級大間距，多個誤判
+        區塊疊加會把單頁內容撐爆成多頁。font_size < 9pt 時應改用
+        緊湊樣式，不論分類結果為何。
+        """
+        html = _render_text({"type": "heading_1", "content": "什項設備", "font_size": 7.5})
+        assert "block-body-compact" in html
+        assert "<h1" not in html
+
+    def test_normal_size_heading_unaffected(self):
+        html = _render_text({"type": "heading_1", "content": "第一章", "font_size": 16.0})
+        assert "<h1" in html
+        assert "block-h1" in html
+
+    def test_missing_font_size_keeps_heading_rendering(self):
+        """font_size 為 None 時不應觸發降級（避免誤判沒有字級資訊的區塊）。"""
+        html = _render_text({"type": "heading_1", "content": "標題", "font_size": None})
+        assert "<h1" in html
+
+    def test_boundary_font_size_9pt_not_compact(self):
+        """剛好 9pt 不應觸發降級，門檻是嚴格小於 9。"""
+        html = _render_text({"type": "heading_1", "content": "標題", "font_size": 9.0})
+        assert "<h1" in html
+
+    def test_boundary_font_size_just_under_9pt_is_compact(self):
+        html = _render_text({"type": "heading_1", "content": "標籤", "font_size": 8.9})
+        assert "block-body-compact" in html
 
 
 # ── render_pdf() — mock weasyprint ──────────────────────────
