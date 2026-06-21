@@ -74,6 +74,8 @@ def upload():
         logger.info("[Upload] 快取命中：%s", cm.doc_id[:12])
         parsed = cm.load()
         source = "cache"
+        # 快取命中時也要確保原始 PDF 存在（理論上第一次已寫入，這裡防禦性補寫）
+        _ensure_raw_pdf(cm, file_bytes)
     else:
         logger.info("[Upload] 快取未命中，開始解析：%s", filename)
 
@@ -89,6 +91,7 @@ def upload():
         # ── 4c. 寫入快取 ─────────────────────────────────────
         cm.doc_id = parsed["doc_id"]   # 確保 doc_id 一致
         cm.save(parsed)
+        _ensure_raw_pdf(cm, file_bytes)
         source = "parsed"
 
     # ── 5. 組合回傳 JSON ─────────────────────────────────────
@@ -105,6 +108,18 @@ def upload():
 
 
 # ── 私有工具 ──────────────────────────────────────────────────
+
+def _ensure_raw_pdf(cm: CacheManager, file_bytes: bytes) -> None:
+    """
+    將原始 PDF bytes 存一份到 file_caches/{doc_id}/original.pdf，
+    供 GET /api/doc/<doc_id>/raw 直接以 doc_id 取用（不依賴原始檔名）。
+    冪等操作：若已存在則不重複寫入。
+    """
+    raw_path = cm.cache_dir / "original.pdf"
+    if not raw_path.exists():
+        cm.cache_dir.mkdir(parents=True, exist_ok=True)
+        raw_path.write_bytes(file_bytes)
+
 
 def _allowed(filename: str) -> bool:
     return (

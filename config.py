@@ -53,7 +53,8 @@ MODEL_MANIFEST = {
         "required":   False,
         "validate_files": [
             "config.json",
-            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
             "tokenizer_config.json",
             "model.safetensors",
         ],

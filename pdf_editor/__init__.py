@@ -32,8 +32,14 @@ def create_app() -> Flask:
     # ── 註冊藍圖 ──────────────────────────────────────────────
     from pdf_editor.routes.health import health_bp
     from pdf_editor.routes.upload import upload_bp
+    from pdf_editor.routes.editor import editor_bp
+    from pdf_editor.routes.image import image_bp
+    from pdf_editor.routes.export import export_bp
     app.register_blueprint(health_bp)
     app.register_blueprint(upload_bp)
+    app.register_blueprint(editor_bp)
+    app.register_blueprint(image_bp)
+    app.register_blueprint(export_bp)
 
     # ── 啟動時初始化模型 Registry ─────────────────────────────
     from pdf_editor.services.model_registry import ModelRegistry

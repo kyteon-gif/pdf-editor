@@ -1,0 +1,356 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+  color: #1a1a1a;
+  background: #f5f5f5;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.app-header h1 {
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.saving-indicator {
+  font-size: 0.85rem;
+  color: #888;
+}
+
+.error-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 1.25rem;
+  background: #fde8e8;
+  color: #9b1c1c;
+  font-size: 0.9rem;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  color: #888;
+}
+
+.split-pane {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+
+.pane {
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.pane-left {
+  background: #fafafa;
+  border-right: 1px solid #e0e0e0;
+}
+
+.pane-right {
+  background: #fff;
+}
+
+.pdf-viewer-placeholder,
+.editor-panel-placeholder {
+  height: 100%;
+}
+
+.meta-line {
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.block-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.block-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.block-item:hover {
+  border-color: #b0b0b0;
+}
+
+.block-item-active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.block-type-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: #eee;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.block-preview {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.validation-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.validation-error {
+  background: #fde8e8;
+  color: #9b1c1c;
+}
+
+.encoding-warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.ocr-used {
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.ocr-low-confidence {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+/* ── TextBlockEditor ────────────────────────────────────────── */
+
+/* 文字類型區塊改用直排：內容列 + 徽章列，
+   覆寫 .block-item 原本的單行 flex 佈局 */
+.block-item-text {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+
+.block-item-editing {
+  border-color: #2563eb;
+  cursor: default;
+}
+
+.block-item-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.block-preview-editable {
+  cursor: text;
+}
+
+.block-preview-editable:hover {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.block-text-input {
+  flex: 1;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2563eb;
+  border-radius: 4px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.block-edit-btn {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+}
+
+.block-edit-btn:hover {
+  background: #e5e7eb;
+}
+
+.block-saving-hint {
+  font-size: 0.75rem;
+  color: #888;
+  flex-shrink: 0;
+}
+
+.block-save-error {
+  font-size: 0.75rem;
+  color: #9b1c1c;
+  background: #fde8e8;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+}
+
+.block-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.block-badges:empty {
+  display: none;
+}
+
+/* ── PdfViewer ──────────────────────────────────────────────── */
+
+.pdf-viewer-wrapper {
+  position: relative;
+  height: 100%;
+}
+
+.pdf-zoom-toolbar {
+  position: sticky;
+  top: 0.5rem;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(4px);
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  width: fit-content;
+  margin-bottom: 0.5rem;
+}
+
+.pdf-zoom-toolbar button {
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  font-size: 0.9rem;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.pdf-zoom-level {
+  font-size: 0.75rem;
+  color: #555;
+  min-width: 2.8rem;
+  text-align: center;
+}
+
+.pdf-zoom-reset {
+  width: auto !important;
+  padding: 0 0.4rem !important;
+  font-size: 0.7rem !important;
+}
+
+.pdf-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+}
+
+.pdf-viewer-loading,
+.pdf-viewer-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #888;
+}
+
+.pdf-viewer-error {
+  color: #9b1c1c;
+}
+
+.pdf-page {
+  position: relative;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+.pdf-page-canvas {
+  display: block;
+}
+
+.pdf-page-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.pdf-block-highlight {
+  position: absolute;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.pdf-block-highlight:hover {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.35);
+}
+
+.pdf-block-active {
+  background: rgba(37, 99, 235, 0.15) !important;
+  border-color: #2563eb !important;
+}
+
+.pdf-block-table,
+.pdf-block-overview {
+  border-color: rgba(22, 163, 74, 0.0);
+}
+
+.pdf-block-image {
+  border-color: rgba(217, 119, 6, 0.0);
+}

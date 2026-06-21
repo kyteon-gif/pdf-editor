@@ -54,6 +54,11 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
             f"缺少必要套件：{e}。請執行 pip install pdfplumber pymupdf"
         ) from e
 
+    # ── Step 0：提前開啟 fitz 文件，供 cid 亂碼 fallback 使用 ──
+    # （圖片擷取也會用到，避免重複開檔，這裡統一管理生命週期）
+    fitz_doc_for_text = fitz.open(stream=file_bytes, filetype="pdf")
+    fitz_page_cache: dict[int, "fitz.Page"] = {}
+
     # ── Step 1：pdfplumber 擷取文字與表格 ─────────────────────
     with pdfplumber.open(file_bytes if isinstance(file_bytes, (str, Path))
                          else __bytes_to_stream(file_bytes)) as pdf:
@@ -62,6 +67,10 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
 
         for page_num, page in enumerate(pdf.pages, start=1):
             logger.debug("[Parser] 處理第 %d/%d 頁", page_num, page_count)
+
+            # 對應快取同一頁的 fitz page 物件，供 cid 亂碼 fallback 使用
+            if page_num not in fitz_page_cache:
+                fitz_page_cache[page_num] = fitz_doc_for_text[page_num - 1]
 
             # ── 1a. 擷取表格（先擷取，後續排除這些區域的文字）──
             page_tables = page.extract_tables(
@@ -118,6 +127,32 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
                 font_size = _dominant_font_size(line_words)
                 font_name = _dominant_font_name(line_words)
 
+                # ── cid 亂碼偵測與 OCR fallback ────────────────
+                # 某些 PDF（常見於 DOCX 轉檔且嵌入子集字型但缺少完整
+                # ToUnicode CMap）會讓任何標準文字抽取 API（pdfplumber、
+                # PyMuPDF 皆然）回傳無意義的字型內部編碼或偽字符，
+                # 這是 PDF 本身字型結構的限制，並非函式庫的 bug，
+                # 唯一可靠的解法是用 OCR 對該區域重新辨識。
+                # 此路徑需要本機已安裝 tesseract 與對應語言包
+                # （繁中：chi_tra，簡中：chi_sim），否則 fallback 會
+                # 靜默失敗並保留原始（雖無意義但至少不誤導的）內容。
+                is_garbled = _is_cid_garbled(content)
+                ocr_used = False
+                ocr_low_confidence = False
+                if is_garbled:
+                    ocr_text = _extract_text_via_ocr(fitz_page_cache, page_num, bbox)
+                    if ocr_text:
+                        content = ocr_text
+                        ocr_used = True
+                        # OCR 有跑出結果不代表結果可信：若辨識出的內容
+                        # 看起來像亂湊的英數混雜字串（例如 "meran_ N_ 7
+                        # mwmsax"），明顯不像正常標題或內文，保留警示
+                        # 而非直接判定為已解決，避免使用者誤信錯誤內容。
+                        if _looks_like_ocr_noise(content):
+                            ocr_low_confidence = True
+                        else:
+                            is_garbled = False  # 結果可信，解除警示
+
                 texts[blk_id] = {
                     "id":        blk_id,
                     "type":      "unknown",     # classifier 填入
@@ -126,11 +161,15 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
                     "content":   content,
                     "font_size": font_size,
                     "font_name": font_name,
+                    "encoding_warning": is_garbled or ocr_low_confidence,
+                    "ocr_used":  ocr_used,
+                    "ocr_low_confidence": ocr_low_confidence,
                 }
                 structure.append(blk_id)
 
     # ── Step 2：PyMuPDF 擷取嵌入圖片 ─────────────────────────
-    fitz_doc = fitz.open(stream=file_bytes, filetype="pdf")
+    # 圖片擷取沿用同一份 fitz 文件，避免重複開檔
+    fitz_doc = fitz_doc_for_text
     for page_num in range(len(fitz_doc)):
         page_fitz = fitz_doc[page_num]
         img_list   = page_fitz.get_images(full=True)
@@ -141,6 +180,16 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
             img_bytes  = base_image.get("image", b"")
             if not img_bytes:
                 continue
+
+            # ── 色彩空間正規化 ────────────────────────────────
+            # 部分 PDF（尤其印刷流程產出）內嵌 CMYK 色彩模式的圖片，
+            # 但匯出階段 WeasyPrint/Pillow 存檔為 PNG 時只支援
+            # RGB/RGBA/灰階，CMYK 會直接拋出
+            # "cannot write mode CMYK as PNG"。在擷取當下就統一轉成
+            # RGB，避免問題延遲到匯出階段才爆炸、且難以定位是哪張圖。
+            img_bytes, img_ext = _normalize_image_colorspace(
+                img_bytes, base_image.get("ext", "png")
+            )
 
             # 取得圖片在頁面上的位置（bbox）
             img_rects = page_fitz.get_image_rects(xref)
@@ -159,7 +208,7 @@ def parse_pdf(file_bytes: bytes, filename: str = "document.pdf") -> dict:
                 "content":   "",
                 "font_size": None,
                 "font_name": None,
-                "image_ext": base_image.get("ext", "png"),
+                "image_ext": img_ext,
             }
 
     fitz_doc.close()
@@ -189,6 +238,194 @@ def __bytes_to_stream(data: bytes):
     """將 bytes 包成 file-like object 給 pdfplumber.open()。"""
     import io
     return io.BytesIO(data)
+
+
+_CID_PATTERN = __import__("re").compile(r"\(cid:\d+\)")
+
+
+def _looks_like_ocr_noise(text: str) -> bool:
+    """
+    粗略判斷 OCR 辨識結果是否「不像正常文字」。
+
+    典型噪聲特徵：英數字與底線/符號混雜、無空白分隔的隨機字母組合
+    （例如 "meran_ N_ 7 mwmsax"），通常發生在裁切框圈到不連續內容
+    （例如圖表中跨越多個無關元素的窄帶區域）導致 OCR 誤判背景雜訊
+    或圖形線條為文字筆畫。
+
+    判斷標準（任一成立即視為噪聲）：
+    - 完全不含中文字元，且包含底線 "_"（正常 OCR 輸出極少出現底線，
+      通常是 Tesseract 把雜訊筆畫誤判為底線符號）
+    - 完全不含中文，且為 3 個以上由空白分隔的短字母片段
+      （長度均 <= 4 的破碎詞組，不像完整單字或句子）
+    """
+    if not text:
+        return False
+
+    has_chinese = any("\u4e00" <= ch <= "\u9fff" for ch in text)
+    if has_chinese:
+        return False  # 含中文字元的結果，噪聲機率低，不在此啟發式範圍內
+
+    if "_" in text:
+        return True
+
+    tokens = text.split()
+    short_tokens = [t for t in tokens if len(t) <= 4]
+    if len(tokens) >= 3 and len(short_tokens) == len(tokens):
+        return True
+
+    return False
+
+
+def _is_cid_garbled(text: str) -> bool:
+    """
+    判斷文字是否為 cid 編碼亂碼。
+    判斷標準：若字串中 "(cid:N)" 片段佔比過高（>= 30% 的字元數），
+    視為該行主要由無法解碼的字型內部編碼組成。
+    """
+    if not text:
+        return False
+    matches = _CID_PATTERN.findall(text)
+    if not matches:
+        return False
+    cid_char_count = sum(len(m) for m in matches)
+    return cid_char_count / max(len(text), 1) >= 0.3
+
+
+def _extract_text_via_ocr(
+    page_cache: dict[int, "object"], page_num: int, bbox: tuple
+) -> str:
+    """
+    用 OCR（Tesseract）重新辨識指定 bbox 區域的文字。
+
+    背景：當 PDF 嵌入字型缺少有效的 /ToUnicode 對照表時，這是
+    PDF 檔案本身的結構限制 —— 無論 pdfplumber 或 PyMuPDF 的標準
+    文字抽取 API 都無法正確解碼，只能回傳無意義的內部編碼或
+    錯誤映射後的偽字符。OCR 是這種情況下唯一可靠的還原方式：
+    把該文字區域渲染成點陣圖，再用光學辨識讀出實際顯示的字元。
+
+    本機需求：
+    - pip install pytesseract pillow
+    - 系統安裝 tesseract-ocr 主程式
+    - 安裝繁體中文語言包（Ubuntu/Debian: apt install
+      tesseract-ocr-chi-tra；macOS: brew install tesseract-lang）
+      缺少語言包時仍會嘗試辨識，但準確率會大幅下降甚至失敗。
+
+    任何環節缺失（套件未安裝、辨識失敗、結果為空）都會靜默
+    回傳空字串，呼叫端會保留原始內容並維持 encoding_warning 標記，
+    不會讓解析流程中斷。
+    """
+    page = page_cache.get(page_num)
+    if page is None:
+        return ""
+
+    try:
+        import fitz  # PyMuPDF；獨立 import，避免依賴 parse_pdf() 區域變數
+        import pytesseract
+        from PIL import Image
+        import io as _io
+    except ImportError as e:
+        logger.warning(
+            "[Parser] OCR fallback 略過：缺少套件 %s"
+            "（請執行 pip install pytesseract pillow，並安裝系統 tesseract）",
+            e,
+        )
+        return ""
+
+    try:
+        x0, y0, x1, y1 = bbox
+        box_height = y1 - y0
+        box_width  = x1 - x0
+
+        # 留白邊界：原本固定 2pt 對窄小文字行（常見於圖表內的小字
+        # 標籤、座標軸文字）幾乎沒有緩衝，放大後字符容易貼邊被裁切，
+        # 嚴重影響辨識率。改為依區塊高度等比例留白，並設最小值。
+        padding_y = max(box_height * 0.6, 4)
+        padding_x = max(box_width * 0.05, 4)
+        clip = fitz.Rect(
+            x0 - padding_x, y0 - padding_y,
+            x1 + padding_x, y1 + padding_y,
+        )
+
+        # 放大渲染倍率（zoom）以提升小字辨識準確率，
+        # 區塊越小，放大倍率拉得更高（Tesseract 對過小的字元辨識率很差）
+        zoom = 4.0 if box_height < 15 else 3.0
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix, clip=clip)
+
+        img = Image.open(_io.BytesIO(pix.tobytes("png")))
+
+        # PSM (Page Segmentation Mode)：
+        # 這些區塊絕大多數是單行短文字（標題、標籤、百分比），
+        # 預設的「自動分段」模式常誤判為多欄版面而切錯。
+        # --psm 7 = 將整張圖視為單一文字行，--psm 6 = 視為單一區塊，
+        # 短而窄的區塊用 7，較寬的區塊（可能跨多個詞組）用 6。
+        psm = 7 if box_height < 20 else 6
+        config = f"--psm {psm}"
+
+        # 優先嘗試繁體中文，語言包不存在時 fallback 純英文
+        # （Tesseract 找不到語言包會拋出 TesseractError）
+        try:
+            text = pytesseract.image_to_string(img, lang="chi_tra+eng", config=config)
+        except Exception:
+            text = pytesseract.image_to_string(img, lang="eng", config=config)
+
+        result = text.strip().replace("\n", " ")
+
+        # 第一次辨識為空時，多半是極窄區塊（如圖例小標籤）被
+        # psm 7 誤判為無文字行，改用 psm 8（單詞模式）重試一次
+        if not result and box_height < 20:
+            try:
+                retry_text = pytesseract.image_to_string(
+                    img, lang="chi_tra+eng", config="--psm 8"
+                )
+            except Exception:
+                retry_text = pytesseract.image_to_string(img, lang="eng", config="--psm 8")
+            result = retry_text.strip().replace("\n", " ")
+
+        return result
+
+    except Exception as e:
+        logger.warning("[Parser] OCR fallback 辨識失敗 page=%d: %s", page_num, e)
+        return ""
+
+
+def _normalize_image_colorspace(img_bytes: bytes, ext: str) -> tuple[bytes, str]:
+    """
+    將圖片色彩空間正規化為匯出流程相容的格式。
+
+    背景：部分 PDF（尤其經印刷流程產出）內嵌 CMYK 色彩模式的圖片。
+    PNG 格式本身不支援 CMYK，WeasyPrint/Pillow 在匯出階段存檔為 PNG
+    時會直接拋出 "cannot write mode CMYK as PNG" 而讓整個匯出失敗。
+    在擷取當下就統一轉換，問題定位更直接，也讓快取中存的圖片本身
+    就是可直接使用的格式。
+
+    若 Pillow 未安裝或轉換過程出錯，靜默回傳原始 bytes/ext，
+    不讓解析流程因為這個非核心步驟而中斷（匯出階段仍可能失敗，
+    但至少解析與編輯功能不受影響）。
+    """
+    try:
+        from PIL import Image
+        import io as _io
+    except ImportError:
+        return img_bytes, ext
+
+    try:
+        img = Image.open(_io.BytesIO(img_bytes))
+
+        if img.mode in ("CMYK", "LAB", "P"):
+            # P（調色盤模式）也一併正規化，避免少數調色盤含透明索引
+            # 在某些 PDF 檢視器與 WeasyPrint 之間出現不一致的轉換結果
+            img = img.convert("RGB")
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue(), "png"
+
+        # 其他模式（RGB/RGBA/L/1 等）原生相容，不需轉換
+        return img_bytes, ext
+
+    except Exception as e:
+        logger.warning("[Parser] 圖片色彩空間正規化失敗，保留原始格式: %s", e)
+        return img_bytes, ext
 
 
 def _make_id(prefix: str, page: int, index: int) -> str:

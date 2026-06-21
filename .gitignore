@@ -15,3 +15,6 @@ dist/
 .gz
 .tar.gz
 .zip
+frontend/node_modules/
+frontend/dist/
+*-lock*.json

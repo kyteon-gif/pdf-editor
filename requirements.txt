@@ -5,6 +5,11 @@ flask>=3.0.0
 pdfplumber>=0.11.0
 pymupdf>=1.24.0          # import fitz
 
+# ── OCR fallback（cid 編碼異常時的文字辨識）───────────────────
+# 需另外安裝系統 tesseract 主程式與語言包，見 README
+pytesseract>=0.3.10
+pillow>=10.0.0
+
 # ── Word 文件（樣式對照）────────────────────────────────────
 python-docx>=1.1.0
 
